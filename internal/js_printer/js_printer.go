@@ -2919,6 +2919,12 @@ func (p *printer) printStmt(stmt js_ast.Stmt) {
 		p.needsSemicolon = false
 
 	case *js_ast.SImport:
+
+		ignore := p.options.RemoveDebugTool && len(p.options.DebugTool) > 0 && p.isImportDebugTool(s)
+		if ignore {
+			break
+		}
+
 		itemCount := 0
 
 		p.printIndent()
@@ -3000,10 +3006,12 @@ func (p *printer) printStmt(stmt js_ast.Stmt) {
 		p.printNewline()
 
 	case *js_ast.SDebugger:
-		p.printIndent()
-		p.printSpaceBeforeIdentifier()
-		p.print("debugger")
-		p.printSemicolonAfterStatement()
+		if !p.options.RemoveDebugger {
+			p.printIndent()
+			p.printSpaceBeforeIdentifier()
+			p.print("debugger")
+			p.printSemicolonAfterStatement()
+		}
 
 	case *js_ast.SDirective:
 		c := p.bestQuoteCharForString(s.Value, false /* allowBacktick */)
@@ -3053,13 +3061,203 @@ func (p *printer) printStmt(stmt js_ast.Stmt) {
 		p.printSemicolonAfterStatement()
 
 	case *js_ast.SExpr:
-		p.printIndent()
-		p.stmtStart = len(p.js)
-		p.printExpr(s.Value, js_ast.LLowest, 0)
-		p.printSemicolonAfterStatement()
-
+		ignore := (p.options.RemoveConsole && p.isConsole(s.Value)) ||
+			(len(p.options.DebugTool) > 0 && p.checkDebugTool(s.Value))
+		if !ignore {
+			p.printIndent()
+			p.stmtStart = len(p.js)
+			p.printExpr(s.Value, js_ast.LLowest, 0)
+			p.printSemicolonAfterStatement()
+		}
 	default:
 		panic(fmt.Sprintf("Unexpected statement of type %T", stmt.Data))
+	}
+}
+
+func (p *printer) isConsole(expr js_ast.Expr) bool {
+	switch e := expr.Data.(type) {
+	case *js_ast.ECall:
+		switch e2 := e.Target.Data.(type) {
+		case *js_ast.EDot:
+			switch e3 := e2.Target.Data.(type) {
+			case *js_ast.EIdentifier:
+				ident := p.renamer.NameForSymbol(e3.Ref)
+				return ident == "console"
+			}
+		}
+	}
+	return false
+}
+
+func (p *printer) isImportDebugTool(s *js_ast.SImport) bool {
+	if s.DefaultName != nil {
+		ident := p.renamer.NameForSymbol(s.DefaultName.Ref)
+		if p.options.RemoveDebugTool && ident == p.options.DebugTool {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *printer) checkDebugTool(expr js_ast.Expr) bool {
+	switch e := expr.Data.(type) {
+	case *js_ast.ECall:
+		switch e2 := e.Target.Data.(type) {
+		case *js_ast.EDot:
+			switch e3 := e2.Target.Data.(type) {
+			case *js_ast.EImportIdentifier:
+				ident := p.renamer.NameForSymbol(e3.Ref)
+				if ident == p.options.DebugTool {
+					if !p.options.RemoveDebugTool {
+						p.printIndent()
+						p.stmtStart = len(p.js)
+						p.printDebugToolExpr(expr, js_ast.LLowest, 0)
+						p.printSemicolonAfterStatement()
+					}
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func (p *printer) printDebugToolExpr(expr js_ast.Expr, level js_ast.L, flags int) {
+	p.addSourceMapping(expr.Loc)
+
+	switch e := expr.Data.(type) {
+
+	case *js_ast.ECall:
+		wrap := level >= js_ast.LNew || (flags&forbidCall) != 0
+		targetFlags := 0
+		if e.OptionalChain == js_ast.OptionalChainNone {
+			targetFlags = hasNonOptionalChainParent
+		} else if (flags & hasNonOptionalChainParent) != 0 {
+			wrap = true
+		}
+
+		hasPureComment := !p.options.RemoveWhitespace && e.CanBeUnwrappedIfUnused
+		if hasPureComment && level >= js_ast.LPostfix {
+			wrap = true
+		}
+
+		if wrap {
+			p.print("(")
+		}
+
+		if hasPureComment {
+			wasStmtStart := p.stmtStart == len(p.js)
+			p.print("/* @__PURE__ */ ")
+			if wasStmtStart {
+				p.stmtStart = len(p.js)
+			}
+		}
+
+		// We don't ever want to accidentally generate a direct eval expression here
+		if !e.IsDirectEval && p.isUnboundEvalIdentifier(e.Target) {
+			if p.options.RemoveWhitespace {
+				p.print("(0,")
+			} else {
+				p.print("(0, ")
+			}
+			p.printExpr(e.Target, js_ast.LPostfix, 0)
+			p.print(")")
+		} else {
+			p.printExpr(e.Target, js_ast.LPostfix, targetFlags)
+		}
+
+		if e.OptionalChain == js_ast.OptionalChainStart {
+			p.print("?.")
+		}
+		p.print("(")
+		p.printDebugToolExprLoc(e.Target.Loc)
+		for _, arg := range e.Args {
+			p.printDebugToolExprArg(arg)
+		}
+		p.print(")")
+		if wrap {
+			p.print(")")
+		}
+
+	default:
+		panic(fmt.Sprintf("Unexpected expression of type %T", expr.Data))
+	}
+}
+
+func (p *printer) printDebugToolExprArg(arg js_ast.Expr) {
+	p.print(",")
+	p.printSpace()
+
+	switch arg.Data.(type) {
+	case *js_ast.EString:
+		p.printExpr(arg, js_ast.LComma, 0)
+
+	case *js_ast.ETemplate:
+		p.printExpr(arg, js_ast.LComma, 0)
+
+	case *js_ast.ERegExp:
+		p.printExpr(arg, js_ast.LComma, 0)
+
+	default:
+		opts := p.options
+		opts.RemoveWhitespace = false
+		opts.MangleSyntax = false
+		opts.Indent = 0
+
+		pExpr := &printer{
+			symbols:                   p.symbols,
+			renamer:                   p.renamer,
+			importRecords:             p.importRecords,
+			options:                   opts,
+			stmtStart:                 -1,
+			exportDefaultStart:        -1,
+			arrowExprStart:            -1,
+			prevOpEnd:                 -1,
+			prevNumEnd:                -1,
+			prevRegExpEnd:             -1,
+			prevLoc:                   logger.Loc{Start: -1},
+			lineOffsetTables:          p.lineOffsetTables,
+			coverLinesWithoutMappings: false,
+		}
+
+		pExpr.printExpr(arg, js_ast.LComma, 0)
+
+		str := strings.ReplaceAll(string(pExpr.js), "`", "'")
+		p.print("[`")
+		p.print(str)
+		p.print("`,")
+
+		p.printSpace()
+		p.printExpr(arg, js_ast.LComma, 0)
+		p.print("]")
+	}
+}
+func (p *printer) printDebugToolExprLoc(loc logger.Loc) {
+
+	// Binary search to find the line
+	lineOffsetTables := p.lineOffsetTables
+	count := len(lineOffsetTables)
+	originalLine := 0
+	for count > 0 {
+		step := count / 2
+		i := originalLine + step
+		if lineOffsetTables[i].byteOffsetToStartOfLine <= loc.Start {
+			originalLine = i + 1
+			count = count - step - 1
+		} else {
+			count = step
+		}
+	}
+	originalLine--
+
+	if originalLine == -10 {
+		p.print("{")
+		// TODO: p.print("source:")
+		p.print("line:")
+		p.print(fmt.Sprintf("%d", originalLine))
+		p.print("}")
+	} else {
+		p.print("null")
 	}
 }
 
@@ -3091,6 +3289,11 @@ type Options struct {
 	// This will be present if the input file had a source map. In that case we
 	// want to map all the way back to the original input file(s).
 	InputSourceMap *sourcemap.SourceMap
+
+	RemoveConsole   bool
+	RemoveDebugger  bool
+	DebugTool       string
+	RemoveDebugTool bool
 }
 
 type SourceMapChunk struct {

@@ -222,6 +222,11 @@ type Options struct {
 	ExcludeSourcesContent bool
 
 	Stdin *StdinInfo
+
+	RemoveConsole   bool
+	RemoveDebugger  bool
+	DebugTool       string
+	RemoveDebugTool bool
 }
 
 type InjectedDefine struct {

@@ -78,7 +78,11 @@ var helpText = func(colors logger.Colors) string {
   --sources-content=false   Omit "sourcesContent" in generated source maps
   --tree-shaking=...        Set to "ignore-annotations" to work with packages
                             that have incorrect tree-shaking annotations
-  --tsconfig=...            Use this tsconfig.json file instead of other ones
+	--tsconfig=...            Use this tsconfig.json file instead of other ones
+	--remove--console         Removes console calls
+	--remove--debugger        Removes debugger statements
+	--debugTool=...           debugTool
+	--removeDebugTool         remove debugTool
   --version                 Print the current version and exit (` + esbuildVersion + `)
 
 ` + colors.Bold + `Examples:` + colors.Default + `

@@ -106,6 +106,10 @@ function pushCommonFlags(flags: string[], options: CommonOptions, keys: OptionKe
   let keepNames = getFlag(options, keys, 'keepNames', mustBeBoolean);
   let banner = getFlag(options, keys, 'banner', mustBeString);
   let footer = getFlag(options, keys, 'footer', mustBeString);
+  let removeConsole = getFlag(options, keys, 'removeConsole', mustBeBoolean);
+  let removeDebugger = getFlag(options, keys, 'removeDebugger', mustBeBoolean);
+  let debugTool = getFlag(options, keys, 'debugTool', mustBeString);
+  let removeDebugTool = getFlag(options, keys, 'removeDebugTool', mustBeBoolean);
 
   if (target) {
     if (Array.isArray(target)) flags.push(`--target=${Array.from(target).map(validateTarget).join(',')}`)
@@ -135,6 +139,11 @@ function pushCommonFlags(flags: string[], options: CommonOptions, keys: OptionKe
 
   if (banner) flags.push(`--banner=${banner}`);
   if (footer) flags.push(`--footer=${footer}`);
+
+  if (removeConsole) flags.push('--remove-console');
+  if (removeDebugger) flags.push('--remove-debugger');
+  if (debugTool) flags.push(`--debug-tool=${debugTool}`);
+  if (removeDebugTool) flags.push('--remove-debug-tool');
 }
 
 function flagsForBuildOptions(

@@ -1,4 +1,5 @@
 // This API exposes esbuild's two main operations: building and transforming.
+// This API exposes esbuild's two main operations: building and transforming.
 // It's intended for integrating esbuild into other tools as a library.
 //
 // If you are just trying to run esbuild from Go without the overhead of
@@ -255,6 +256,11 @@ type BuildOptions struct {
 	Write       bool
 	Incremental bool
 	Plugins     []Plugin
+
+	RemoveConsole   bool
+	RemoveDebugger  bool
+	DebugTool       string
+	RemoveDebugTool bool
 }
 
 type StdinOptions struct {
@@ -317,6 +323,11 @@ type TransformOptions struct {
 
 	Sourcefile string
 	Loader     Loader
+
+	RemoveConsole   bool
+	RemoveDebugger  bool
+	DebugTool       string
+	RemoveDebugTool bool
 }
 
 type TransformResult struct {

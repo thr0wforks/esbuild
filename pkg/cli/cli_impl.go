@@ -141,6 +141,34 @@ func parseOptionsImpl(osArgs []string, buildOpts *api.BuildOptions, transformOpt
 			}
 			hasBareSourceMapFlag = false
 
+		case arg == "--remove-console":
+			if buildOpts != nil {
+				buildOpts.RemoveConsole = true
+			} else {
+				transformOpts.RemoveConsole = true
+			}
+
+		case arg == "--remove-debugger":
+			if buildOpts != nil {
+				buildOpts.RemoveDebugger = true
+			} else {
+				transformOpts.RemoveDebugger = true
+			}
+
+		case arg == "--remove-debug-tool":
+			if buildOpts != nil {
+				buildOpts.RemoveDebugTool = true
+			} else {
+				transformOpts.RemoveDebugTool = true
+			}
+
+		case strings.HasPrefix(arg, "--debug-tool="):
+			if buildOpts != nil {
+				buildOpts.DebugTool = arg[len("--debug-tool="):]
+			} else {
+				transformOpts.DebugTool = arg[len("--debug-tool="):]
+			}
+
 		case strings.HasPrefix(arg, "--sources-content="):
 			value := arg[len("--sources-content="):]
 			var sourcesContent api.SourcesContent
