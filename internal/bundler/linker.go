@@ -413,8 +413,7 @@ func newLinkerContext(
 			repr.meta = fileMeta{
 				cjsStyleExports: repr.ast.HasCommonJSFeatures() ||
 					(options.Mode == config.ModeBundle && repr.ast.ModuleScope.ContainsDirectEval) ||
-					(repr.ast.HasLazyExport && (c.options.Mode == config.ModePassThrough ||
-						(c.options.Mode == config.ModeConvertFormat && !c.options.OutputFormat.KeepES6ImportExportSyntax()))),
+					(repr.ast.HasLazyExport && c.options.Mode == config.ModeConvertFormat && !c.options.OutputFormat.KeepES6ImportExportSyntax()),
 				partMeta:                 make([]partMeta, len(repr.ast.Parts)),
 				resolvedExports:          resolvedExports,
 				isProbablyTypeScriptType: make(map[js_ast.Ref]bool),
@@ -451,14 +450,21 @@ func newLinkerContext(
 		file := &c.files[sourceIndex]
 		file.isEntryPoint = true
 
-		// Entry points with ES6 exports must generate an exports object when
-		// targeting non-ES6 formats. Note that the IIFE format only needs this
-		// when the global name is present, since that's the only way the exports
-		// can actually be observed externally.
-		if repr, ok := file.repr.(*reprJS); ok && repr.ast.HasES6Exports && (options.OutputFormat == config.FormatCommonJS ||
-			(options.OutputFormat == config.FormatIIFE && len(options.GlobalName) > 0)) {
-			repr.ast.UsesExportsRef = true
-			repr.meta.forceIncludeExportsForEntryPoint = true
+		if repr, ok := file.repr.(*reprJS); ok {
+			// Lazy exports default to CommonJS-style for the transform API
+			if repr.ast.HasLazyExport && c.options.Mode == config.ModePassThrough {
+				repr.meta.cjsStyleExports = true
+			}
+
+			// Entry points with ES6 exports must generate an exports object when
+			// targeting non-ES6 formats. Note that the IIFE format only needs this
+			// when the global name is present, since that's the only way the exports
+			// can actually be observed externally.
+			if repr.ast.HasES6Exports && (options.OutputFormat == config.FormatCommonJS ||
+				(options.OutputFormat == config.FormatIIFE && len(options.GlobalName) > 0)) {
+				repr.ast.UsesExportsRef = true
+				repr.meta.forceIncludeExportsForEntryPoint = true
+			}
 		}
 	}
 
@@ -794,6 +800,10 @@ func (c *linkerContext) computeCrossChunkDependencies(chunks []chunkInfo) {
 							if importToBind, ok := repr.meta.importsToBind[ref]; ok {
 								ref = importToBind.ref
 								symbol = c.symbols.Get(ref)
+							} else if repr.meta.cjsWrap && ref != repr.ast.WrapperRef {
+								// The only internal symbol that wrapped CommonJS files export
+								// is the wrapper itself.
+								continue
 							}
 
 							// If this is an ES6 import from a CommonJS file, it will become a
@@ -1885,7 +1895,8 @@ loop:
 				symbol := c.symbols.Get(tracker.importRef)
 				symbol.ImportItemStatus = js_ast.ImportItemMissing
 				c.log.AddRangeWarning(&source, js_lexer.RangeOfIdentifier(source, namedImport.AliasLoc),
-					fmt.Sprintf("Import %q will always be undefined", namedImport.Alias))
+					fmt.Sprintf("Import %q will always be undefined because the file %q has no exports",
+						namedImport.Alias, c.files[nextTracker.sourceIndex].source.PrettyPath))
 			}
 
 		case importNoMatch:
@@ -2122,19 +2133,19 @@ func (c *linkerContext) advanceImportTracker(tracker importTracker) (importTrack
 	// Is this a disabled file?
 	otherSourceIndex := *record.SourceIndex
 	if c.files[otherSourceIndex].source.KeyPath.Namespace == resolver.BrowserFalseNamespace {
-		return importTracker{}, importDisabled, nil
+		return importTracker{sourceIndex: otherSourceIndex, importRef: js_ast.InvalidRef}, importDisabled, nil
 	}
 
 	// Is this a named import of a file without any exports?
 	otherRepr := c.files[otherSourceIndex].repr.(*reprJS)
 	if namedImport.Alias != "*" && !otherRepr.ast.UsesCommonJSExports() && !otherRepr.ast.HasES6Syntax() && !otherRepr.ast.HasLazyExport {
 		// Just warn about it and replace the import with "undefined"
-		return importTracker{}, importCommonJSWithoutExports, nil
+		return importTracker{sourceIndex: otherSourceIndex, importRef: js_ast.InvalidRef}, importCommonJSWithoutExports, nil
 	}
 
 	// Is this a CommonJS file?
 	if otherRepr.meta.cjsStyleExports {
-		return importTracker{}, importCommonJS, nil
+		return importTracker{sourceIndex: otherSourceIndex, importRef: js_ast.InvalidRef}, importCommonJS, nil
 	}
 
 	// Match this import up with an export from the imported file
@@ -4269,10 +4280,14 @@ func (c *linkerContext) generateSourceMapForChunk(
 
 		// Simple case: no nested source map
 		if file.sourceMap == nil {
+			var quotedContents []byte
+			if !c.options.ExcludeSourcesContent {
+				quotedContents = dataForSourceMaps[result.sourceIndex].quotedContents[0]
+			}
 			items = append(items, item{
 				path:           file.source.KeyPath,
 				prettyPath:     file.source.PrettyPath,
-				quotedContents: dataForSourceMaps[result.sourceIndex].quotedContents[0],
+				quotedContents: quotedContents,
 			})
 			continue
 		}
@@ -4291,10 +4306,14 @@ func (c *linkerContext) generateSourceMapForChunk(
 				path.Text = c.fs.Join(c.fs.Dir(file.source.KeyPath.Text), source)
 			}
 
+			var quotedContents []byte
+			if !c.options.ExcludeSourcesContent {
+				quotedContents = dataForSourceMaps[result.sourceIndex].quotedContents[i]
+			}
 			items = append(items, item{
 				path:           path,
 				prettyPath:     source,
-				quotedContents: dataForSourceMaps[result.sourceIndex].quotedContents[i],
+				quotedContents: quotedContents,
 			})
 		}
 	}
@@ -4320,14 +4339,16 @@ func (c *linkerContext) generateSourceMapForChunk(
 	j.AddString("]")
 
 	// Write the sourcesContent
-	j.AddString(",\n  \"sourcesContent\": [")
-	for i, item := range items {
-		if i != 0 {
-			j.AddString(", ")
+	if !c.options.ExcludeSourcesContent {
+		j.AddString(",\n  \"sourcesContent\": [")
+		for i, item := range items {
+			if i != 0 {
+				j.AddString(", ")
+			}
+			j.AddBytes(item.quotedContents)
 		}
-		j.AddBytes(item.quotedContents)
+		j.AddString("]")
 	}
-	j.AddString("]")
 
 	// Write the mappings
 	j.AddString(",\n  \"mappings\": \"")

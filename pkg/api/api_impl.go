@@ -316,12 +316,14 @@ func validateJSX(log logger.Log, text string, name string) []string {
 	return parts
 }
 
-func validateDefines(log logger.Log, defines map[string]string, pureFns []string) *config.ProcessedDefines {
+func validateDefines(log logger.Log, defines map[string]string, pureFns []string) (*config.ProcessedDefines, []config.InjectedDefine) {
 	if len(defines) == 0 && len(pureFns) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	rawDefines := make(map[string]config.DefineData)
+	valueToInject := make(map[string]config.InjectedDefine)
+	var definesToInject []string
 
 	for key, value := range defines {
 		// The key must be a dot-separated identifier list
@@ -337,8 +339,8 @@ func validateDefines(log logger.Log, defines map[string]string, pureFns []string
 			if _, ok := js_lexer.Keywords[value]; !ok {
 				name := value // The closure must close over a variable inside the loop
 				rawDefines[key] = config.DefineData{
-					DefineFunc: func(loc logger.Loc, findSymbol config.FindSymbol) js_ast.E {
-						return &js_ast.EIdentifier{Ref: findSymbol(loc, name)}
+					DefineFunc: func(args config.DefineArgs) js_ast.E {
+						return &js_ast.EIdentifier{Ref: args.FindSymbol(args.Loc, name)}
 					},
 				}
 
@@ -359,23 +361,42 @@ func validateDefines(log logger.Log, defines map[string]string, pureFns []string
 			continue
 		}
 
-		// Only allow atoms for now
 		var fn config.DefineFunc
 		switch e := expr.Data.(type) {
+		// These values are inserted inline, and can participate in constant folding
 		case *js_ast.ENull:
-			fn = func(logger.Loc, config.FindSymbol) js_ast.E { return &js_ast.ENull{} }
+			fn = func(config.DefineArgs) js_ast.E { return &js_ast.ENull{} }
 		case *js_ast.EBoolean:
-			fn = func(logger.Loc, config.FindSymbol) js_ast.E { return &js_ast.EBoolean{Value: e.Value} }
+			fn = func(config.DefineArgs) js_ast.E { return &js_ast.EBoolean{Value: e.Value} }
 		case *js_ast.EString:
-			fn = func(logger.Loc, config.FindSymbol) js_ast.E { return &js_ast.EString{Value: e.Value} }
+			fn = func(config.DefineArgs) js_ast.E { return &js_ast.EString{Value: e.Value} }
 		case *js_ast.ENumber:
-			fn = func(logger.Loc, config.FindSymbol) js_ast.E { return &js_ast.ENumber{Value: e.Value} }
+			fn = func(config.DefineArgs) js_ast.E { return &js_ast.ENumber{Value: e.Value} }
+
+		// These values are extracted into a shared symbol reference
+		case *js_ast.EArray, *js_ast.EObject:
+			definesToInject = append(definesToInject, key)
+			valueToInject[key] = config.InjectedDefine{Source: source, Data: e, Name: key}
+			continue
+
 		default:
 			log.AddError(nil, logger.Loc{}, fmt.Sprintf("Invalid define value: %q", value))
 			continue
 		}
 
 		rawDefines[key] = config.DefineData{DefineFunc: fn}
+	}
+
+	// Sort injected defines for determinism, since the imports will be injected
+	// into every file in the order that we return them from this function
+	injectedDefines := make([]config.InjectedDefine, len(definesToInject))
+	sort.Strings(definesToInject)
+	for i, key := range definesToInject {
+		index := i // Capture this for the closure below
+		injectedDefines[i] = valueToInject[key]
+		rawDefines[key] = config.DefineData{DefineFunc: func(args config.DefineArgs) js_ast.E {
+			return &js_ast.EIdentifier{Ref: args.SymbolForDefine(index)}
+		}}
 	}
 
 	for _, key := range pureFns {
@@ -396,7 +417,7 @@ func validateDefines(log logger.Log, defines map[string]string, pureFns []string
 	// Processing defines is expensive. Process them once here so the same object
 	// can be shared between all parsers we create using these arguments.
 	processed := config.ProcessDefines(rawDefines)
-	return &processed
+	return &processed, injectedDefines
 }
 
 func validatePath(log logger.Log, fs fs.FS, relPath string) string {
@@ -514,6 +535,7 @@ func rebuildImpl(
 	realFS := fs.RealFS()
 	jsFeatures, cssFeatures := validateFeatures(log, buildOpts.Target, buildOpts.Engines)
 	outJS, outCSS := validateOutputExtensions(log, buildOpts.OutExtensions)
+	defines, injectedDefines := validateDefines(log, buildOpts.Define, buildOpts.Pure)
 	options := config.Options{
 		UnsupportedJSFeatures:  jsFeatures,
 		UnsupportedCSSFeatures: cssFeatures,
@@ -521,38 +543,40 @@ func rebuildImpl(
 			Factory:  validateJSX(log, buildOpts.JSXFactory, "factory"),
 			Fragment: validateJSX(log, buildOpts.JSXFragment, "fragment"),
 		},
-		Defines:              validateDefines(log, buildOpts.Define, buildOpts.Pure),
-		Platform:             validatePlatform(buildOpts.Platform),
-		SourceMap:            validateSourceMap(buildOpts.Sourcemap),
-		MangleSyntax:         buildOpts.MinifySyntax,
-		RemoveWhitespace:     buildOpts.MinifyWhitespace,
-		MinifyIdentifiers:    buildOpts.MinifyIdentifiers,
-		ASCIIOnly:            validateASCIIOnly(buildOpts.Charset),
-		IgnoreDCEAnnotations: validateIgnoreDCEAnnotations(buildOpts.TreeShaking),
-		GlobalName:           validateGlobalName(log, buildOpts.GlobalName),
-		CodeSplitting:        buildOpts.Splitting,
-		OutputFormat:         validateFormat(buildOpts.Format),
-		AbsOutputFile:        validatePath(log, realFS, buildOpts.Outfile),
-		AbsOutputDir:         validatePath(log, realFS, buildOpts.Outdir),
-		AbsOutputBase:        validatePath(log, realFS, buildOpts.Outbase),
-		AbsMetadataFile:      validatePath(log, realFS, buildOpts.Metafile),
-		OutputExtensionJS:    outJS,
-		OutputExtensionCSS:   outCSS,
-		ExtensionToLoader:    validateLoaders(log, buildOpts.Loader),
-		ExtensionOrder:       validateResolveExtensions(log, buildOpts.ResolveExtensions),
-		ExternalModules:      validateExternals(log, realFS, buildOpts.External),
-		TsConfigOverride:     validatePath(log, realFS, buildOpts.Tsconfig),
-		MainFields:           buildOpts.MainFields,
-		PublicPath:           buildOpts.PublicPath,
-		KeepNames:            buildOpts.KeepNames,
-		InjectAbsPaths:       make([]string, len(buildOpts.Inject)),
-		Banner:               buildOpts.Banner,
-		Footer:               buildOpts.Footer,
-		Plugins:              plugins,
-		RemoveConsole:        buildOpts.RemoveConsole,
-		RemoveDebugger:       buildOpts.RemoveDebugger,
-		DebugTool:            buildOpts.DebugTool,
-		RemoveDebugTool:      buildOpts.RemoveDebugTool,
+		Defines:               defines,
+		InjectedDefines:       injectedDefines,
+		Platform:              validatePlatform(buildOpts.Platform),
+		SourceMap:             validateSourceMap(buildOpts.Sourcemap),
+		ExcludeSourcesContent: buildOpts.SourcesContent == SourcesContentExclude,
+		MangleSyntax:          buildOpts.MinifySyntax,
+		RemoveWhitespace:      buildOpts.MinifyWhitespace,
+		MinifyIdentifiers:     buildOpts.MinifyIdentifiers,
+		ASCIIOnly:             validateASCIIOnly(buildOpts.Charset),
+		IgnoreDCEAnnotations:  validateIgnoreDCEAnnotations(buildOpts.TreeShaking),
+		GlobalName:            validateGlobalName(log, buildOpts.GlobalName),
+		CodeSplitting:         buildOpts.Splitting,
+		OutputFormat:          validateFormat(buildOpts.Format),
+		AbsOutputFile:         validatePath(log, realFS, buildOpts.Outfile),
+		AbsOutputDir:          validatePath(log, realFS, buildOpts.Outdir),
+		AbsOutputBase:         validatePath(log, realFS, buildOpts.Outbase),
+		AbsMetadataFile:       validatePath(log, realFS, buildOpts.Metafile),
+		OutputExtensionJS:     outJS,
+		OutputExtensionCSS:    outCSS,
+		ExtensionToLoader:     validateLoaders(log, buildOpts.Loader),
+		ExtensionOrder:        validateResolveExtensions(log, buildOpts.ResolveExtensions),
+		ExternalModules:       validateExternals(log, realFS, buildOpts.External),
+		TsConfigOverride:      validatePath(log, realFS, buildOpts.Tsconfig),
+		MainFields:            buildOpts.MainFields,
+		PublicPath:            buildOpts.PublicPath,
+		KeepNames:             buildOpts.KeepNames,
+		InjectAbsPaths:        make([]string, len(buildOpts.Inject)),
+		Banner:                buildOpts.Banner,
+		Footer:                buildOpts.Footer,
+		Plugins:               plugins,
+		RemoveConsole:         buildOpts.RemoveConsole,
+		RemoveDebugger:        buildOpts.RemoveDebugger,
+		DebugTool:             buildOpts.DebugTool,
+		RemoveDebugTool:       buildOpts.RemoveDebugTool,
 	}
 	for i, path := range buildOpts.Inject {
 		options.InjectAbsPaths[i] = validatePath(log, realFS, path)
@@ -769,12 +793,15 @@ func transformImpl(input string, transformOpts TransformOptions) TransformResult
 
 	// Convert and validate the transformOpts
 	jsFeatures, cssFeatures := validateFeatures(log, transformOpts.Target, transformOpts.Engines)
+	defines, injectedDefines := validateDefines(log, transformOpts.Define, transformOpts.Pure)
 	options := config.Options{
 		UnsupportedJSFeatures:   jsFeatures,
 		UnsupportedCSSFeatures:  cssFeatures,
 		JSX:                     jsx,
-		Defines:                 validateDefines(log, transformOpts.Define, transformOpts.Pure),
+		Defines:                 defines,
+		InjectedDefines:         injectedDefines,
 		SourceMap:               validateSourceMap(transformOpts.Sourcemap),
+		ExcludeSourcesContent:   transformOpts.SourcesContent == SourcesContentExclude,
 		OutputFormat:            validateFormat(transformOpts.Format),
 		GlobalName:              validateGlobalName(log, transformOpts.GlobalName),
 		MangleSyntax:            transformOpts.MinifySyntax,

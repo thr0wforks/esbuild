@@ -944,9 +944,51 @@ func (s *scanner) allocateSourceIndex(path logger.Path, kind cache.SourceIndexKi
 }
 
 func (s *scanner) preprocessInjectedFiles() {
-	injectedFiles := make([]config.InjectedFile, 0, len(s.options.InjectAbsPaths))
+	injectedFiles := make([]config.InjectedFile, 0, len(s.options.InjectedDefines)+len(s.options.InjectAbsPaths))
 	duplicateInjectedFiles := make(map[string]bool)
 	injectWaitGroup := sync.WaitGroup{}
+
+	// These are virtual paths that are generated for compound "--define" values.
+	// They are special-cased and are not available for plugins to intercept.
+	for _, define := range s.options.InjectedDefines {
+		// These should be unique by construction so no need to check for collisions
+		visitedKey := logger.Path{Text: fmt.Sprintf("<define:%s>", define.Name)}
+		sourceIndex := s.allocateSourceIndex(visitedKey, cache.SourceIndexNormal)
+		s.visited[visitedKey] = sourceIndex
+		source := logger.Source{
+			Index:          sourceIndex,
+			KeyPath:        visitedKey,
+			PrettyPath:     s.res.PrettyPath(visitedKey),
+			IdentifierName: js_ast.EnsureValidIdentifier(visitedKey.Text),
+		}
+
+		// The first "len(InjectedDefine)" injected files intentionally line up
+		// with the injected defines by index. The index will be used to import
+		// references to them in the parser.
+		injectedFiles = append(injectedFiles, config.InjectedFile{
+			Path:        visitedKey.Text,
+			SourceIndex: sourceIndex,
+			IsDefine:    true,
+		})
+
+		// Generate the file inline here since it has already been parsed
+		expr := js_ast.Expr{Data: define.Data}
+		ast := js_parser.LazyExportAST(s.log, source, js_parser.OptionsFromConfig(&s.options), expr, "")
+		result := parseResult{
+			ok: true,
+			file: file{
+				source:         source,
+				loader:         config.LoaderJSON,
+				repr:           &reprJS{ast: ast},
+				ignoreIfUnused: true,
+			},
+		}
+
+		// Append to the channel on a goroutine in case it blocks due to capacity
+		s.remaining++
+		go func() { s.resultChannel <- result }()
+	}
+
 	for _, absPath := range s.options.InjectAbsPaths {
 		prettyPath := s.res.PrettyPath(logger.Path{Text: absPath, Namespace: "file"})
 		lowerAbsPath := lowerCaseAbsPathForWindows(absPath)
@@ -976,6 +1018,7 @@ func (s *scanner) preprocessInjectedFiles() {
 			injectWaitGroup.Done()
 		}(i, prettyPath, resolveResult)
 	}
+
 	injectWaitGroup.Wait()
 	s.options.InjectedFiles = injectedFiles
 }
@@ -1487,28 +1530,30 @@ func (b *Bundle) computeDataForSourceMapsInParallel(options *config.Options, rea
 					result := &results[sourceIndex]
 					result.lineOffsetTables = js_printer.GenerateLineOffsetTables(f.source.Contents, repr.ast.ApproximateLineCount)
 					sm := f.sourceMap
-					if sm == nil {
-						// Simple case: no nested source map
-						result.quotedContents = [][]byte{js_printer.QuoteForJSON(f.source.Contents, options.ASCIIOnly)}
-					} else {
-						// Complex case: nested source map
-						result.quotedContents = make([][]byte, len(sm.Sources))
-						nullContents := []byte("null")
-						for i := range sm.Sources {
-							// Missing contents become a "null" literal
-							quotedContents := nullContents
-							if i < len(sm.SourcesContent) {
-								if value := sm.SourcesContent[i]; value.Quoted != "" {
-									if options.ASCIIOnly && !isASCIIOnly(value.Quoted) {
-										// Re-quote non-ASCII values if output is ASCII-only
-										quotedContents = js_printer.QuoteForJSON(js_lexer.UTF16ToString(value.Value), options.ASCIIOnly)
-									} else {
-										// Otherwise just use the value directly from the input file
-										quotedContents = []byte(value.Quoted)
+					if !options.ExcludeSourcesContent {
+						if sm == nil {
+							// Simple case: no nested source map
+							result.quotedContents = [][]byte{js_printer.QuoteForJSON(f.source.Contents, options.ASCIIOnly)}
+						} else {
+							// Complex case: nested source map
+							result.quotedContents = make([][]byte, len(sm.Sources))
+							nullContents := []byte("null")
+							for i := range sm.Sources {
+								// Missing contents become a "null" literal
+								quotedContents := nullContents
+								if i < len(sm.SourcesContent) {
+									if value := sm.SourcesContent[i]; value.Quoted != "" {
+										if options.ASCIIOnly && !isASCIIOnly(value.Quoted) {
+											// Re-quote non-ASCII values if output is ASCII-only
+											quotedContents = js_printer.QuoteForJSON(js_lexer.UTF16ToString(value.Value), options.ASCIIOnly)
+										} else {
+											// Otherwise just use the value directly from the input file
+											quotedContents = []byte(value.Quoted)
+										}
 									}
 								}
+								result.quotedContents[i] = quotedContents
 							}
-							result.quotedContents[i] = quotedContents
 						}
 					}
 					waitGroup.Done()
@@ -1748,7 +1793,7 @@ func (cache *runtimeCache) processedDefines(key config.Platform) (defines *confi
 	}
 	result := config.ProcessDefines(map[string]config.DefineData{
 		"__platform": {
-			DefineFunc: func(logger.Loc, config.FindSymbol) js_ast.E {
+			DefineFunc: func(config.DefineArgs) js_ast.E {
 				return &js_ast.EString{Value: js_lexer.StringToUTF16(platform)}
 			},
 		},

@@ -6,6 +6,29 @@
 * Add `--remove-debugger` option that avoids print debugger statement to target
 * Add `--debug-tool=...` enable debug tool in target ([more info](https://github.com/evanw/esbuild/blob/master/docs/debugtool.md))
 * Add `--removedebug-tool=...` remove debug tool from target([more info](https://github.com/evanw/esbuild/blob/master/docs/debugtool.md))
+## Unreleased
+
+* Mark `import.meta` as supported in node 10.4+ ([#626](https://github.com/evanw/esbuild/issues/626))
+
+    It was previously marked as unsupported due to a typo in esbuild's compatibility table, which meant esbuild generated a shim for `import.meta` even when it's not necessary. It should now be marked as supported in node 10.4 and above so the shim will no longer be included when using a sufficiently new target environment such as `--target=node10.4`.
+
+* Fix for when the working directory ends with `/` ([#627](https://github.com/evanw/esbuild/issues/627))
+
+    If the working directory ended in `/`, the last path component would be incorrectly duplicated. This was the case when running esbuild with Yarn 2 (but not Yarn 1) and is problematic because some externally-facing directories reference the current working directory in plugins and in output files. The problem has now been fixed and the last path component is no longer duplicated in this case. This fix was contributed by [@remorses](https://github.com/remorses).
+
+* Add an option to omit `sourcesContent` from generated source maps ([#624](https://github.com/evanw/esbuild/issues/624))
+
+    You can now pass `--sources-content=false` to omit the `sourcesContent` field from generated source maps. The field embeds the original source code inline in the source map and is the largest part of the source map. This is useful if you don't need the original source code and would like a smaller source map (e.g. you only care about stack traces and don't need the source code for debugging).
+
+* Fix exports from ESM files converted to CJS during code splitting ([#617](https://github.com/evanw/esbuild/issues/617))
+
+    This release fixes an edge case where files in ECMAScript module format that are converted to CommonJS format during bundling can generate exports to non-top-level symbols when code splitting is active. These files must be converted to CommonJS format if they are referenced by a `require()` call. When that happens, the symbols in that file are placed inside the CommonJS wrapper closure and are no longer top-level symbols. This means they should no longer be considered exportable for cross-chunk export generation due to code splitting. The result of this fix is that these cases no longer generate output files with module instantiation errors.
+
+* Allow `--define` with array and object literals ([#581](https://github.com/evanw/esbuild/issues/581))
+
+    The `--define` feature allows you to replace identifiers such as `DEBUG` with literal expressions such as `false`. This is valuable because the substitution can then participate in constant folding and dead code elimination. For example, `if (DEBUG) { ... }` could become `if (false) { ... }` which would then be completely removed in minified builds. However, doing this with compound literal expressions such as array and object literals is an anti-pattern because it could easily result in many copies of the same object in the output file.
+
+    This release adds support for array and object literals with `--define` anyway, but they work differently than other `--define` expressions. In this case a separate virtual file is created and configured to be injected into all files similar to how the `--inject` feature works. This means there is only at most one copy of the value in a given output file. However, these values do not participate in constant folding and dead code elimination, since the object can now potentially be mutated at run-time.
 
 ## 0.8.26
 
@@ -70,7 +93,7 @@
 
 * Optionally take binary executable path from environment variable ([#592](https://github.com/evanw/esbuild/issues/592))
 
-    You can now set the `ESBUILD_BINARY_PATH` environment variable to cause the JavaScript API to use a different binary executable path. This is useful if you want to substitute a modified version of the `esbuild` binary that contains some extra debugging information.
+    You can now set the `ESBUILD_BINARY_PATH` environment variable to cause the JavaScript API to use a different binary executable path. This is useful if you want to substitute a modified version of the `esbuild` binary that contains some extra debugging information. This feature was contributed by [@remorses](https://github.com/remorses).
 
 ## 0.8.23
 

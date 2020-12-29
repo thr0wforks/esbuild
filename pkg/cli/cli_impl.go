@@ -169,6 +169,23 @@ func parseOptionsImpl(osArgs []string, buildOpts *api.BuildOptions, transformOpt
 				transformOpts.DebugTool = arg[len("--debug-tool="):]
 			}
 
+		case strings.HasPrefix(arg, "--sources-content="):
+			value := arg[len("--sources-content="):]
+			var sourcesContent api.SourcesContent
+			switch value {
+			case "false":
+				sourcesContent = api.SourcesContentExclude
+			case "true":
+				sourcesContent = api.SourcesContentInclude
+			default:
+				return fmt.Errorf("Invalid sources content: %q (valid: false, true)", value)
+			}
+			if buildOpts != nil {
+				buildOpts.SourcesContent = sourcesContent
+			} else {
+				transformOpts.SourcesContent = sourcesContent
+			}
+
 		case strings.HasPrefix(arg, "--sourcefile="):
 			if buildOpts != nil {
 				if buildOpts.Stdin == nil {

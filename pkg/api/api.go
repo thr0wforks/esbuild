@@ -87,6 +87,13 @@ const (
 	SourceMapExternal
 )
 
+type SourcesContent uint8
+
+const (
+	SourcesContentInclude SourcesContent = iota
+	SourcesContentExclude
+)
+
 type Target uint8
 
 const (
@@ -204,9 +211,11 @@ type BuildOptions struct {
 	ErrorLimit int
 	LogLevel   LogLevel
 
-	Sourcemap SourceMap
-	Target    Target
-	Engines   []Engine
+	Sourcemap      SourceMap
+	SourcesContent SourcesContent
+
+	Target  Target
+	Engines []Engine
 
 	MinifyWhitespace  bool
 	MinifyIdentifiers bool
@@ -287,7 +296,9 @@ type TransformOptions struct {
 	ErrorLimit int
 	LogLevel   LogLevel
 
-	Sourcemap  SourceMap
+	Sourcemap      SourceMap
+	SourcesContent SourcesContent
+
 	Target     Target
 	Format     Format
 	GlobalName string

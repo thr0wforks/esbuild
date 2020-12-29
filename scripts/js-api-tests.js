@@ -68,7 +68,8 @@ let buildTests = {
   async sourceMap({ esbuild, testDir }) {
     const input = path.join(testDir, 'in.js')
     const output = path.join(testDir, 'out.js')
-    await writeFileAsync(input, 'exports.foo = 123')
+    const content = 'exports.foo = 123'
+    await writeFileAsync(input, content)
     await esbuild.build({ entryPoints: [input], outfile: output, sourcemap: true })
     const result = require(output)
     assert.strictEqual(result.foo, 123)
@@ -78,12 +79,15 @@ let buildTests = {
     const resultMap = await readFileAsync(output + '.map', 'utf8')
     const json = JSON.parse(resultMap)
     assert.strictEqual(json.version, 3)
+    assert.strictEqual(json.sources[0], path.basename(input))
+    assert.strictEqual(json.sourcesContent[0], content)
   },
 
   async sourceMapExternal({ esbuild, testDir }) {
     const input = path.join(testDir, 'in.js')
     const output = path.join(testDir, 'out.js')
-    await writeFileAsync(input, 'exports.foo = 123')
+    const content = 'exports.foo = 123'
+    await writeFileAsync(input, content)
     await esbuild.build({ entryPoints: [input], outfile: output, sourcemap: 'external' })
     const result = require(output)
     assert.strictEqual(result.foo, 123)
@@ -93,12 +97,15 @@ let buildTests = {
     const resultMap = await readFileAsync(output + '.map', 'utf8')
     const json = JSON.parse(resultMap)
     assert.strictEqual(json.version, 3)
+    assert.strictEqual(json.sources[0], path.basename(input))
+    assert.strictEqual(json.sourcesContent[0], content)
   },
 
   async sourceMapInline({ esbuild, testDir }) {
     const input = path.join(testDir, 'in.js')
     const output = path.join(testDir, 'out.js')
-    await writeFileAsync(input, 'exports.foo = 123')
+    const content = 'exports.foo = 123'
+    await writeFileAsync(input, content)
     await esbuild.build({ entryPoints: [input], outfile: output, sourcemap: 'inline' })
     const result = require(output)
     assert.strictEqual(result.foo, 123)
@@ -106,6 +113,44 @@ let buildTests = {
     const match = /\/\/# sourceMappingURL=data:application\/json;base64,(.*)/.exec(outputFile)
     const json = JSON.parse(Buffer.from(match[1], 'base64').toString())
     assert.strictEqual(json.version, 3)
+    assert.strictEqual(json.sources[0], path.basename(input))
+    assert.strictEqual(json.sourcesContent[0], content)
+  },
+
+  async sourceMapIncludeSourcesContent({ esbuild, testDir }) {
+    const input = path.join(testDir, 'in.js')
+    const output = path.join(testDir, 'out.js')
+    const content = 'exports.foo = 123'
+    await writeFileAsync(input, content)
+    await esbuild.build({ entryPoints: [input], outfile: output, sourcemap: true, sourcesContent: true })
+    const result = require(output)
+    assert.strictEqual(result.foo, 123)
+    const outputFile = await readFileAsync(output, 'utf8')
+    const match = /\/\/# sourceMappingURL=(.*)/.exec(outputFile)
+    assert.strictEqual(match[1], 'out.js.map')
+    const resultMap = await readFileAsync(output + '.map', 'utf8')
+    const json = JSON.parse(resultMap)
+    assert.strictEqual(json.version, 3)
+    assert.strictEqual(json.sources[0], path.basename(input))
+    assert.strictEqual(json.sourcesContent[0], content)
+  },
+
+  async sourceMapExcludeSourcesContent({ esbuild, testDir }) {
+    const input = path.join(testDir, 'in.js')
+    const output = path.join(testDir, 'out.js')
+    const content = 'exports.foo = 123'
+    await writeFileAsync(input, content)
+    await esbuild.build({ entryPoints: [input], outfile: output, sourcemap: true, sourcesContent: false })
+    const result = require(output)
+    assert.strictEqual(result.foo, 123)
+    const outputFile = await readFileAsync(output, 'utf8')
+    const match = /\/\/# sourceMappingURL=(.*)/.exec(outputFile)
+    assert.strictEqual(match[1], 'out.js.map')
+    const resultMap = await readFileAsync(output + '.map', 'utf8')
+    const json = JSON.parse(resultMap)
+    assert.strictEqual(json.version, 3)
+    assert.strictEqual(json.sources[0], path.basename(input))
+    assert.strictEqual(json.sourcesContent, void 0)
   },
 
   async resolveExtensionOrder({ esbuild, testDir }) {
@@ -124,6 +169,26 @@ let buildTests = {
       resolveExtensions: ['.something.js', '.js'],
     })
     assert.strictEqual(require(output).result, 123)
+  },
+
+  async defineObject({ esbuild, testDir }) {
+    const input = path.join(testDir, 'in.js');
+    const output = path.join(testDir, 'out.js')
+    await writeFileAsync(input, 'export default {abc, xyz}')
+    await esbuild.build({
+      entryPoints: [input],
+      outfile: output,
+      format: 'cjs',
+      bundle: true,
+      define: {
+        abc: '["a", "b", "c"]',
+        xyz: '{"x": 1, "y": 2, "z": 3}',
+      },
+    })
+    assert.deepStrictEqual(require(output).default, {
+      abc: ['a', 'b', 'c'],
+      xyz: { x: 1, y: 2, z: 3 },
+    })
   },
 
   async inject({ esbuild, testDir }) {
@@ -1834,6 +1899,12 @@ let transformTests = {
     assert.strictEqual(code, `console.log("production");\n`)
   },
 
+  async defineArray({ service }) {
+    const define = { 'process.env.NODE_ENV': '[1,2,3]', 'something.else': '[2,3,4]' }
+    const { code } = await service.transform(`console.log(process.env.NODE_ENV)`, { define })
+    assert.strictEqual(code, `var define_process_env_NODE_ENV_default = [1, 2, 3];\nconsole.log(define_process_env_NODE_ENV_default);\n`)
+  },
+
   async defineWarning({ service }) {
     const define = { 'process.env.NODE_ENV': 'production' }
     const { code, warnings } = await service.transform(`console.log(process.env.NODE_ENV)`, { define })
@@ -2316,6 +2387,53 @@ let serialTests = {
         }
       } finally {
         firstService.stop();
+      }
+    } finally {
+      process.chdir(originalCWD);
+    }
+  },
+
+  async processCwdSymlinkInfiniteLoopTest({ esbuild, testDir }) {
+    if (process.platform === 'win32') {
+      // Ignore symlink tests on Windows, which doesn't have symlinks
+      return;
+    }
+
+    let originalCWD = process.cwd();
+
+    try {
+      let service
+      let aDir = path.join(testDir, 'a');
+      fs.mkdirSync(aDir, { recursive: true })
+
+      try {
+        process.chdir(aDir);
+        assert.strictEqual(process.cwd(), aDir);
+        service = await esbuild.startService();
+
+        let bDir = path.join(testDir, 'b');
+        fs.rmdirSync(aDir)
+
+        // Create two symlinks that point to each other, forming a loop
+        fs.symlinkSync(aDir, bDir);
+        fs.symlinkSync(bDir, aDir);
+
+        try {
+          // This should not crash or hang
+          await service.build({
+            entryPoints: [path.join(aDir, 'in.js')],
+            logLevel: 'silent',
+            write: false,
+          })
+          throw new Error('Expected a build failure')
+        } catch (e) {
+          let text = e + ''
+          if (!text.startsWith('Error: Build failed with ')) {
+            throw e
+          }
+        }
+      } finally {
+        service.stop();
       }
     } finally {
       process.chdir(originalCWD);
